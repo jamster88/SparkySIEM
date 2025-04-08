@@ -1,0 +1,20 @@
+CONTAINER COMMANDS
+./kafka-topics.sh --create --topic my-topic --bootstrap-server ctest_broker:29092
+./kafka-console-producer.sh  --topic my-topic --bootstrap-server ctest_broker:29092
+>All streams
+>are belong
+>to Kafka
+./kafka-console-consumer.sh --topic my-topic --from-beginning --bootstrap-server ctest_broker:29092
+exit
+
+
+DOCKER COMMANDS
+docker compose up -d
+docker logs ctest_broker
+docker exec -it -w /opt/kafka/bin ctest_broker sh
+docker compose down -v
+
+C-COMPILER COMMANDS
+gcc -Wall -o producer producer.c -lrdkafka
+
+
