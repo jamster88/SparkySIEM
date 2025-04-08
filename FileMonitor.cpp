@@ -1,15 +1,10 @@
-//
-// Created by Jamster on 4/4/25.
-//
-
-#include "FileMonitor.h"
-
 #include <iostream>
 #include <fstream>
 #include <string>
 #include <librdkafka/rdkafkacpp.h>
 #include <sys/inotify.h>
 #include <unistd.h>
+#include <stdexcept>
 
 class FileMonitor {
 public:
@@ -18,24 +13,23 @@ public:
         // Initialize Kafka producer
         std::string errstr;
         RdKafka::Conf* conf = RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL);
-        conf->set("bootstrap.servers", kafkaBroker, errstr);
+        if (conf->set("bootstrap.servers", kafkaBroker, errstr) != RdKafka::Conf::CONF_OK) {
+            throw std::runtime_error("Failed to set Kafka broker: " + errstr);
+        }
         producer = RdKafka::Producer::create(conf, errstr);
         if (!producer) {
-            std::cerr << "Failed to create producer: " << errstr << std::endl;
-            exit(1);
+            throw std::runtime_error("Failed to create Kafka producer: " + errstr);
         }
         delete conf;
 
         // Initialize inotify
         inotifyFd = inotify_init();
         if (inotifyFd < 0) {
-            perror("inotify_init");
-            exit(1);
+            throw std::runtime_error("Failed to initialize inotify: " + std::string(strerror(errno)));
         }
         watchFd = inotify_add_watch(inotifyFd, filePath.c_str(), IN_MODIFY);
         if (watchFd < 0) {
-            perror("inotify_add_watch");
-            exit(1);
+            throw std::runtime_error("Failed to add inotify watch: " + std::string(strerror(errno)));
         }
     }
 
@@ -50,17 +44,25 @@ public:
         while (true) {
             int length = read(inotifyFd, buffer, sizeof(buffer));
             if (length < 0) {
-                perror("read");
-                exit(1);
+                std::cerr << "Error reading inotify events: " << strerror(errno) << std::endl;
+                continue;
             }
 
             for (int i = 0; i < length; i += sizeof(struct inotify_event)) {
                 struct inotify_event* event = (struct inotify_event*)&buffer[i];
                 if (event->mask & IN_MODIFY) {
                     std::ifstream file(filePath);
+                    if (!file.is_open()) {
+                        std::cerr << "Failed to open file: " << filePath << std::endl;
+                        continue;
+                    }
                     std::string line;
                     while (std::getline(file, line)) {
-                        sendToKafka(line);
+                        try {
+                            sendToKafka(line);
+                        } catch (const std::exception& e) {
+                            std::cerr << "Error sending message to Kafka: " << e.what() << std::endl;
+                        }
                     }
                 }
             }
@@ -75,7 +77,7 @@ private:
             const_cast<char*>(message.c_str()), message.size(),
             nullptr, 0, 0, nullptr, nullptr);
         if (resp != RdKafka::ERR_NO_ERROR) {
-            std::cerr << "Failed to produce message: " << RdKafka::err2str(resp) << std::endl;
+            throw std::runtime_error("Failed to produce message: " + RdKafka::err2str(resp));
         }
         producer->poll(0);
     }
