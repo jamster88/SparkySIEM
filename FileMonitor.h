@@ -21,6 +21,6 @@ class FileMonitor
 
     private:
         sendToKafka(const std::string& message);
-}
+};
 
 #endif //FILEMONITOR_H
