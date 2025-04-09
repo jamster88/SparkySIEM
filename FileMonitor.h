@@ -11,6 +11,7 @@ public:
     void monitor();
 
 private:
+    std::string formatMessage(const std::string& filePath, const std::string& line, const std::string& kafkaTopic);
     void sendToKafka(const std::string& message);
 
     std::string filePath;

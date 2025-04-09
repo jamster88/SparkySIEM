@@ -6,6 +6,8 @@
 #include <cstring>
 #include <iostream>
 #include <fstream>
+#include <errno.h>
+#include <chrono>
 
 FileMonitor::FileMonitor(const std::string& filePath, const std::string& kafkaBroker, const std::string& kafkaTopic)
     : filePath(filePath), kafkaBroker(kafkaBroker), kafkaTopic(kafkaTopic) {
@@ -38,6 +40,13 @@ FileMonitor::~FileMonitor() {
     delete producer;
 }
 
+std::string FileMonitor::formatMessage(const std::string& filePath, const std::string& line, const std::string& kafkaTopic) {
+    std::string timestamp = std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+    std::string formattedMessage = "{\"timestamp\": \"" + timestamp + "\", \"filePath\": \"" + filePath + "\", \"kafkaTopic\": \"" + kafkaTopic + "\", \"message\": \"" + line + "\"}";
+    return formattedMessage;
+}
+
 void FileMonitor::monitor() {
     char buffer[1024];
     while (true) {
@@ -47,7 +56,7 @@ void FileMonitor::monitor() {
             continue;
         }
 
-        for (int i = 0; i < length; i += sizeof(struct inotify_event)) {
+        for (int i = 0; i < length;) {
             struct inotify_event* event = (struct inotify_event*)&buffer[i];
             if (event->mask & IN_MODIFY) {
                 std::ifstream file(filePath);
@@ -58,12 +67,13 @@ void FileMonitor::monitor() {
                 std::string line;
                 while (std::getline(file, line)) {
                     try {
-                        sendToKafka(line);
+                        sendToKafka(formatMessage(filePath, line, kafkaTopic));
                     } catch (const std::exception& e) {
                         std::cerr << "Error sending message to Kafka: " << e.what() << std::endl;
                     }
                 }
             }
+            i += sizeof(struct inotify_event) + event->len;
         }
     }
 }
