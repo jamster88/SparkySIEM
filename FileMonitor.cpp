@@ -40,9 +40,17 @@ FileMonitor::~FileMonitor() {
     delete producer;
 }
 
+std::string FileMonitor::getCurrentTimestamp() {
+    auto now = std::chrono::system_clock::now();
+    auto now_c = std::chrono::system_clock::to_time_t(now);
+    char buffer[100];
+    std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", std::localtime(&now_c));
+    return std::string(buffer);
+}
+
 std::string FileMonitor::formatMessage(const std::string& filePath, const std::string& line, const std::string& kafkaTopic) {
-    std::string timestamp = std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count());
+    std::string timestamp = getCurrentTimestamp();
+    // Format the message as a JSON string
     std::string formattedMessage = "{\"timestamp\": \"" + timestamp + "\", \"filePath\": \"" + filePath + "\", \"kafkaTopic\": \"" + kafkaTopic + "\", \"message\": \"" + line + "\"}";
     return formattedMessage;
 }
