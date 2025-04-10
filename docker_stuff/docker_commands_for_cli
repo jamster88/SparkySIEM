@@ -1,0 +1,7 @@
+/opt/kafka/bin/kafka-console-consumer.sh --topic ctest_topic --from-beginning --bootstrap-server ctest_broker:29092
+
+docker exec it bb85d6518a46 /bin/bash
+
+docker run -p 9092:9092 --hostname ctest_broker -td jamster/kafka_expts:v1
+
+docker commit bb85d6518a46 jamster/kafka_expts:v1-1
