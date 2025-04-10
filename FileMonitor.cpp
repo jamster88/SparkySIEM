@@ -1,13 +1,15 @@
 #include "FileMonitor.h"
-#include <librdkafka/rdkafkacpp.h>
-#include <sys/inotify.h>
-#include <unistd.h>
-#include <stdexcept>
-#include <cstring>
-#include <iostream>
-#include <fstream>
-#include <errno.h>
-#include <chrono>
+#include <librdkafka/rdkafkacpp.h> // Used for Kafka producer
+#include <sys/inotify.h>           // Used for inotify functions
+#include <unistd.h>                // Used for close()
+#include <stdexcept>               // Used for std::runtime_error
+#include <cstring>                 // Used for strerror()
+#include <sstream>                 // Used for std::ostringstream
+#include <iomanip>                 // Used for std::setfill and std::setw
+#include <iostream>                // Used for std::cerr
+#include <fstream>                 // Used for std::ifstream
+#include <errno.h>                 // Used for errno
+#include <chrono>                  // Used for timestamp generation
 
 FileMonitor::FileMonitor(const std::string& filePath, const std::string& kafkaBroker, const std::string& kafkaTopic)
     : filePath(filePath), kafkaBroker(kafkaBroker), kafkaTopic(kafkaTopic) {
@@ -43,9 +45,14 @@ FileMonitor::~FileMonitor() {
 std::string FileMonitor::getCurrentTimestamp() {
     auto now = std::chrono::system_clock::now();
     auto now_c = std::chrono::system_clock::to_time_t(now);
+    auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+
     char buffer[100];
     std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", std::localtime(&now_c));
-    return std::string(buffer);
+
+    std::ostringstream timestamp;
+    timestamp << buffer << "." << std::setfill('0') << std::setw(3) << milliseconds.count();
+    return timestamp.str();
 }
 
 std::string FileMonitor::formatMessage(const std::string& filePath, const std::string& line, const std::string& kafkaTopic) {
