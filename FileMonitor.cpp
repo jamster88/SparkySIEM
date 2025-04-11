@@ -55,14 +55,15 @@ std::string FileMonitor::getCurrentTimestamp() {
     return timestamp.str();
 }
 
-std::string FileMonitor::formatMessage(const std::string& filePath, const std::string& line, const std::string& kafkaTopic) {
+std::string FileMonitor::formatMessage(const std::string& filePath, const std::string& line, const std::string& kafkaTopic, const std::string& messageType) {
     std::string timestamp = getCurrentTimestamp();
     // Format the message as a JSON string
-    std::string formattedMessage = "{\"timestamp\": \"" + timestamp + "\", \"filePath\": \"" + filePath + "\", \"kafkaTopic\": \"" + kafkaTopic + "\", \"message\": \"" + line + "\"}";
+    std::string formattedMessage = "{\"timestamp\": \"" + timestamp + "\", \"filePath\": \"" + filePath + "\", \"kafkaTopic\": \"" + kafkaTopic + "\", \"message\": \"" + line + "\", \"type\": \"" + messageType + "\"}";
     return formattedMessage;
 }
 
 void FileMonitor::monitor() {
+    sendToKafka(formatMessage(filePath, " ", kafkaTopic, "INIT"));
     char buffer[1024];
     while (true) {
         int length = read(inotifyFd, buffer, sizeof(buffer));
@@ -77,12 +78,13 @@ void FileMonitor::monitor() {
                 std::ifstream file(filePath);
                 if (!file.is_open()) {
                     std::cerr << "Failed to open file: " << filePath << std::endl;
+                    sendToKafka(formatMessage(filePath, " ", kafkaTopic, "ERROR - FILE OPEN"));
                     continue;
                 }
                 std::string line;
                 while (std::getline(file, line)) {
                     try {
-                        sendToKafka(formatMessage(filePath, line, kafkaTopic));
+                        sendToKafka(formatMessage(filePath, line, kafkaTopic, "MODIFY"));
                     } catch (const std::exception& e) {
                         std::cerr << "Error sending message to Kafka: " << e.what() << std::endl;
                     }
@@ -91,6 +93,8 @@ void FileMonitor::monitor() {
             i += sizeof(struct inotify_event) + event->len;
         }
     }
+    sendToKafka(formatMessage(filePath, " ", kafkaTopic, "CLOSE"));
+    producer->flush(1000);
 }
 
 void FileMonitor::sendToKafka(const std::string& message) {

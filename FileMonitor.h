@@ -12,7 +12,7 @@ public:
 
 private:
     std::string getCurrentTimestamp();
-    std::string formatMessage(const std::string& filePath, const std::string& line, const std::string& kafkaTopic);
+    std::string formatMessage(const std::string& filePath, const std::string& line, const std::string& kafkaTopic, const std::string& messageType);
     void sendToKafka(const std::string& message);
 
     std::string filePath;
