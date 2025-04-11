@@ -11,6 +11,19 @@
 #include <errno.h>                 // Used for errno
 #include <chrono>                  // Used for timestamp generation
 
+/**
+ * @brief Constructs a FileMonitor object to monitor a file for modifications and send events to a Kafka topic.
+ * 
+ * @param filePath The path of the file to monitor for modifications.
+ * @param kafkaBroker The Kafka broker address to connect to.
+ * @param kafkaTopic The Kafka topic to which file modification events will be sent.
+ * 
+ * @throws std::runtime_error If Kafka producer initialization fails or inotify setup fails.
+ * 
+ * This constructor initializes the Kafka producer with the specified broker and topic,
+ * and sets up inotify to monitor the specified file for modifications. If any of these
+ * steps fail, an exception is thrown with an appropriate error message.
+ */
 FileMonitor::FileMonitor(const std::string& filePath, const std::string& kafkaBroker, const std::string& kafkaTopic)
     : filePath(filePath), kafkaBroker(kafkaBroker), kafkaTopic(kafkaTopic) {
     // Initialize Kafka producer
@@ -65,6 +78,12 @@ std::string FileMonitor::formatMessage(const std::string& filePath, const std::s
 void FileMonitor::monitor() {
     sendToKafka(formatMessage(filePath, " ", kafkaTopic, "INIT"));
     char buffer[1024];
+    
+    // Open the file to check if it exists and is accessible
+    // TODO: Check if the file is accessible
+
+    sendToKafka(formatMessage(filePath, " ", kafkaTopic, "INIT - FILE OPEN"));
+    // Start monitoring for file modifications
     while (true) {
         int length = read(inotifyFd, buffer, sizeof(buffer));
         if (length < 0) {
