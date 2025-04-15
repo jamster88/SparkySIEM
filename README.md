@@ -1,5 +1,7 @@
 # SparkySIEM
 
+Spawns from some scratch work in: [text](https://github.com/jamster88/kafka_expts)
+
 The goal is replicate the **very** basic functions of a Splunk Forwarder:
 * point at file (or directory)
 * monitor for changes
