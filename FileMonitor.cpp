@@ -1,3 +1,39 @@
+/**
+ * @file FileMonitor.cpp
+ * @brief Implementation of the FileMonitor class for monitoring file modifications and sending events to a Kafka topic.
+ * 
+ * This file contains the implementation of the FileMonitor class, which uses inotify to monitor
+ * a specified file for modifications and sends the detected changes as messages to a Kafka topic.
+ * The class provides functionality for initializing Kafka producers, setting up inotify watches,
+ * formatting messages as JSON, and continuously monitoring the file for changes.
+ * 
+ * @details
+ * - The constructor initializes the Kafka producer and inotify watch.
+ * - The destructor cleans up resources such as the inotify watch and Kafka producer.
+ * - The `getCurrentTimestamp` method generates a timestamp string in the format "YYYY-MM-DD HH:MM:SS.mmm".
+ * - The `formatMessage` method formats metadata and content into a JSON string.
+ * - The `monitor` method runs an infinite loop to detect file modifications and send updates to Kafka.
+ * - The `sendToKafka` method sends messages to the Kafka topic and handles errors during production.
+ * 
+ * @note
+ * - Ensure that the Kafka broker and topic are properly configured before using this class.
+ * - The `monitor` method runs indefinitely and does not provide a built-in mechanism for graceful termination.
+ * 
+ * @warning
+ * - The `monitor` method assumes the file exists and is accessible. Proper error handling is implemented for file access issues.
+ * - Ensure that the Kafka producer is properly initialized to avoid runtime exceptions.
+ * 
+ * @todo
+ * - Add a mechanism to gracefully terminate the infinite loop in the `monitor` method.
+ * - Implement a check to ensure the file is accessible before starting monitoring.
+ * 
+ * Dependencies:
+ * - C++17 filesystem library for file and directory operations.
+ * 
+ * @author Jamster88 (mcfadden@auburn.edu)
+ * @date 4/4/25
+ */
+
 #include "FileMonitor.h"
 #include <librdkafka/rdkafkacpp.h> // Used for Kafka producer
 #include <sys/inotify.h>           // Used for inotify functions

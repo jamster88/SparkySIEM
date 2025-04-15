@@ -1,3 +1,26 @@
+/**
+ * @class FilesMonitor
+ * @brief A class for monitoring files and directories and sending updates to a Kafka topic.
+ *
+ * The FilesMonitor class provides functionality to monitor a list of files and directories
+ * for changes. It uses a background thread to continuously monitor the specified paths
+ * and sends updates to a specified Kafka topic. The class ensures thread safety and
+ * manages resources efficiently.
+ *
+ * @note This class is not copyable due to the presence of unique pointers and thread management.
+ *
+ * @details
+ * - The constructor initializes the monitoring paths and Kafka topic.
+ * - The destructor ensures proper cleanup of resources.
+ * - The monitorLoop() function runs in a separate thread to handle monitoring.
+ * - The handleFile() function processes individual file or directory paths.
+ * - The cleanupDeletedFiles() function removes files that are no longer present.
+ *
+ * @author Jamster88 (mcfadden@auburn.edu)
+ * @date 4/4/25
+ * @warning This class assumes that the file paths and Kafka topic are valid and accessible.
+ */
+
 #ifndef FILESMONITOR_H
 #define FILESMONITOR_H
 
@@ -8,12 +31,12 @@
 #include <thread>
 #include <chrono>
 #include <mutex>
+#include <vector>
 #include "FileMonitor.h" // Include the existing FileMonitor header
 
 namespace fs = std::filesystem;
 
 /**
- * @class FilesMonitor
  * @brief Monitors multiple files and directories for changes and sends notifications to a Kafka topic.
  *
  * The FilesMonitor class uses inotify to monitor specified files and directories for changes
@@ -32,7 +55,7 @@ public:
      * @brief Destroys the FilesMonitor object and releases resources.
      */
     ~FilesMonitor();
-    
+
 private:
     std::vector<std::string> paths; ///< Vector of file and directory paths to monitor
     std::string topic;              ///< Kafka topic to which messages will be sent
