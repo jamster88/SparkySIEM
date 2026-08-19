@@ -19,6 +19,47 @@ Finally, the goal will be to enable features that *__aren't__* present in the Sp
 This is designed to send the data to a Kafka instance with the expectation that it will be consumed by a Spark Streaming job, however it could be consumed by other tools like Beam, Flink, etc.
 
 
+## How it works
+
+```
+   paths on the command line
+            |
+            v
+     FilesMonitor            one scanning thread; rescans the paths every second,
+            |                starting and stopping per-file monitors as files
+            |                appear and disappear
+            v
+      FileMonitor  x N       one per file, each on its own thread; watches the file
+            |                with inotify and publishes the lines appended to it
+            v
+      MessageSink            interface: what to do with a finished message
+            |
+            +--> KafkaSink   production, wraps librdkafka
+            +--> FakeSink    tests, keeps messages in memory (no broker needed)
+```
+
+`MessageFormat` builds the JSON and the timestamps for all of the above. Splitting the
+destination out behind `MessageSink` is what lets the monitors be tested without Kafka.
+
+
+## Requirements
+
+* Linux, for `inotify` and `eventfd`. The container workflow below covers other hosts.
+* A C++17 compiler and `make`
+* `librdkafka-dev` to build the forwarder
+* `libgtest-dev` and `nlohmann-json3-dev` to build the tests
+* Docker, to run the test suite off Linux or to bring up the Kafka broker
+
+On Debian or Ubuntu:
+
+```sh
+sudo apt-get install g++ make librdkafka-dev libgtest-dev nlohmann-json3-dev
+```
+
+`Dockerfile.test` installs exactly this set, so it doubles as the reference for what is
+needed.
+
+
 ## Building and running
 
 inotify is Linux only, so this builds and runs on Linux. From a macOS or Windows host, use
@@ -53,6 +94,10 @@ make test                                             # on a Linux host, directl
 never leaves artifacts in the working tree. The tests use an in-memory `MessageSink`
 instead of a broker, so no Kafka instance is needed to run them.
 
+`misc/build-and-test-commands.md` has the fuller reference: per-component build and test
+commands, the Kafka topic commands, an end-to-end recipe against a real broker, and the
+mutation-testing procedure used to check that the suite actually catches regressions.
+
 
 ## Message format
 
@@ -82,14 +127,25 @@ newline arrives, so a partially written record is never forwarded in halves.
 
 | file | role |
 | --- | --- |
+| `main.cpp` | argument parsing and signal-based shutdown |
 | `FileMonitor.*` | watches one file with inotify and publishes its changes |
 | `FilesMonitor.*` | watches a list of files and directories, one FileMonitor per file |
 | `MessageSink.h` | destination interface; lets the monitors be tested without a broker |
 | `KafkaSink.*` | librdkafka implementation of that interface |
 | `MessageFormat.*` | timestamp and JSON message construction |
-| `tests/` | GoogleTest suite |
+| `ConfigReader.cpp` | placeholder for config file support; not implemented, not compiled |
+| `Makefile` | builds the forwarder and the tests |
+| `Dockerfile.test` | Linux image with every build and test dependency |
+| `run_tests.sh` | runs the suite in that image, for non-Linux hosts |
+| `tests/` | GoogleTest suite and its helpers |
 | `docker_stuff/` | Kafka broker for local testing |
 | `rand_data_gen/` | generator for synthetic log data |
+| `misc/` | session notes: verification transcript, commands run, build and test reference |
+
+Two leftovers worth knowing about: the `SparkySIEM` binary committed at the repository
+root is a stale x86-64 Linux build of the pre-fix code, kept from an earlier commit, and
+`make` now writes to `build/` instead. `.vscode/tasks.json` still describes a single-file
+`gcc` build that predates the Makefile, so it will not build this project as it stands.
 
 
 ## Known limitations

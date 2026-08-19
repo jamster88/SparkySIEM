@@ -191,10 +191,12 @@ void FileMonitor::readNewData() {
     }
     openErrorReported = false;
 
+    // Measure the file first. Everything below is driven by the gap between `offset`,
+    // which is how far we have already published, and the current end of the file.
     file.seekg(0, std::ios::end);
     const std::streamoff size = file.tellg();
     if (size < 0) {
-        return;
+        return;  // tellg() failed; try again on the next event rather than guessing
     }
 
     if (size < offset) {
@@ -204,18 +206,24 @@ void FileMonitor::readNewData() {
         emit(" ", "TRUNCATED");
     }
 
+    // Consume the new bytes a chunk at a time rather than in one allocation, so a file
+    // that grew by a gigabyte between events does not become a gigabyte-sized string.
     while (offset < size) {
         const std::size_t want =
             static_cast<std::size_t>(std::min<std::streamoff>(kReadChunkSize, size - offset));
         std::string chunk(want, '\0');
 
+        // Seek explicitly each pass: `offset` is the single source of truth for our
+        // position, and it is also reset elsewhere by truncation and rotation.
         file.seekg(offset, std::ios::beg);
         file.read(&chunk[0], static_cast<std::streamsize>(want));
         const std::streamsize got = file.gcount();
         if (got <= 0) {
-            break;
+            break;  // short read; the rest arrives with the next modification event
         }
         chunk.resize(static_cast<std::size_t>(got));
+
+        // Advance only by what was actually read, so nothing is skipped or repeated.
         offset += got;
 
         partialLine += chunk;
@@ -266,6 +274,8 @@ void FileMonitor::processInotifyEvents() {
     bool contentChanged = false;
     bool pathChanged = false;
 
+    // One read() returns a packed run of variable-length events: a fixed-size struct
+    // followed by event->len bytes of name. The bound stops short of a partial header.
     for (ssize_t i = 0; i + static_cast<ssize_t>(sizeof(struct inotify_event)) <= length;) {
         const auto* event = reinterpret_cast<const struct inotify_event*>(&buffer[i]);
 
@@ -297,6 +307,8 @@ void FileMonitor::processInotifyEvents() {
 
 void FileMonitor::monitor() {
     running.store(true);
+    // Lifecycle messages carry a single space rather than an empty string, matching the
+    // message shape consumers already expect: only the "type" field distinguishes them.
     emit(" ", "INIT");
 
     {
