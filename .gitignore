@@ -1,0 +1,6 @@
+# Build output
+build/
+*.o
+
+# Local test artifacts
+rand_data_gen/rand_data_gen

@@ -1,236 +1,344 @@
 /**
  * @file FileMonitor.cpp
- * @brief Implementation of the FileMonitor class for monitoring file modifications and sending events to a Kafka topic.
- * 
- * This file contains the implementation of the FileMonitor class, which uses inotify to monitor
- * a specified file for modifications and sends the detected changes as messages to a Kafka topic.
- * The class provides functionality for initializing Kafka producers, setting up inotify watches,
- * formatting messages as JSON, and continuously monitoring the file for changes.
- * 
- * @details
- * - The constructor initializes the Kafka producer and inotify watch.
- * - The destructor cleans up resources such as the inotify watch and Kafka producer.
- * - The `getCurrentTimestamp` method generates a timestamp string in the format "YYYY-MM-DD HH:MM:SS.mmm".
- * - The `formatMessage` method formats metadata and content into a JSON string.
- * - The `monitor` method runs an infinite loop to detect file modifications and send updates to Kafka.
- * - The `sendToKafka` method sends messages to the Kafka topic and handles errors during production.
- * 
- * @note
- * - Ensure that the Kafka broker and topic are properly configured before using this class.
- * - The `monitor` method runs indefinitely and does not provide a built-in mechanism for graceful termination.
- * 
- * @warning
- * - The `monitor` method assumes the file exists and is accessible. Proper error handling is implemented for file access issues.
- * - Ensure that the Kafka producer is properly initialized to avoid runtime exceptions.
- * 
- * @todo
- * - Add a mechanism to gracefully terminate the infinite loop in the `monitor` method.
- * - Implement a check to ensure the file is accessible before starting monitoring.
- * 
+ * @brief Implementation of the FileMonitor class.
+ *
+ * The monitor keeps a byte offset into the watched file. When inotify reports a
+ * modification, only the bytes past that offset are read, split into complete lines,
+ * and published. That is the difference between forwarding a file's changes and
+ * forwarding the whole file over and over.
+ *
+ * The event loop waits in poll() on two descriptors: the inotify descriptor and an
+ * eventfd that stop() writes to. That gives a prompt, race-free shutdown, and it means
+ * a failure to read the file can never turn into a busy loop, because the loop only
+ * advances when poll() reports something to do.
+ *
  * Dependencies:
- * - C++17 filesystem library for file and directory operations.
- * 
+ * - Linux inotify and eventfd.
+ * - C++17 filesystem library for splitting the path.
+ *
  * @author Jamster88 (mcfadden@auburn.edu)
  * @date 4/4/25
  */
 
 #include "FileMonitor.h"
-#include <librdkafka/rdkafkacpp.h> // Used for Kafka producer
-#include <sys/inotify.h>           // Used for inotify functions
-#include <unistd.h>                // Used for close()
-#include <stdexcept>               // Used for std::runtime_error
-#include <cstring>                 // Used for strerror()
-#include <sstream>                 // Used for std::ostringstream
-#include <iomanip>                 // Used for std::setfill and std::setw
-#include <iostream>                // Used for std::cerr
-#include <fstream>                 // Used for std::ifstream
-#include <errno.h>                 // Used for errno
-#include <chrono>                  // Used for timestamp generation
 
-/**
- * @brief Constructs a FileMonitor object to monitor a file for modifications and send events to a Kafka topic.
- * 
- * @param filePath The path of the file to monitor for modifications.
- * @param kafkaBroker The Kafka broker address to connect to.
- * @param kafkaTopic The Kafka topic to which file modification events will be sent.
- * 
- * @throws std::runtime_error If Kafka producer initialization fails or inotify setup fails.
- * 
- * This constructor initializes the Kafka producer with the specified broker and topic,
- * and sets up inotify to monitor the specified file for modifications. If any of these
- * steps fail, an exception is thrown with an appropriate error message.
- */
-FileMonitor::FileMonitor(const std::string& filePath, const std::string& kafkaBroker, const std::string& kafkaTopic)
-    : filePath(filePath), kafkaBroker(kafkaBroker), kafkaTopic(kafkaTopic) {
-    // Initialize Kafka producer
-    std::string errstr;
-    RdKafka::Conf* conf = RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL);
-    if (conf->set("bootstrap.servers", kafkaBroker, errstr) != RdKafka::Conf::CONF_OK) {
-        throw std::runtime_error("Failed to set Kafka broker: " + errstr);
-    }
-    producer = RdKafka::Producer::create(conf, errstr);
-    if (!producer) {
-        throw std::runtime_error("Failed to create Kafka producer: " + errstr);
-    }
-    delete conf;
+#include <algorithm>   // Used for std::min
+#include <cerrno>      // Used for errno
+#include <cstring>     // Used for strerror
+#include <filesystem>  // Used to split the path into directory and file name
+#include <fstream>     // Used for std::ifstream
+#include <iostream>    // Used for std::cerr
+#include <stdexcept>   // Used for std::runtime_error
+#include <vector>      // Used for the inotify read buffer
 
-    // Initialize inotify
-    inotifyFd = inotify_init();
+#include <poll.h>          // Used for poll()
+#include <sys/eventfd.h>   // Used for eventfd()
+#include <sys/inotify.h>   // Used for inotify
+#include <sys/stat.h>      // Used for stat()
+#include <unistd.h>        // Used for read() and close()
+
+#include "KafkaSink.h"
+#include "MessageFormat.h"
+
+namespace {
+/// Events that matter on the monitored file itself.
+constexpr uint32_t kFileEvents = IN_MODIFY | IN_MOVE_SELF | IN_DELETE_SELF;
+/// Events that matter on the parent directory: a replacement file appearing.
+constexpr uint32_t kDirectoryEvents = IN_CREATE | IN_MOVED_TO;
+/// How long poll() waits before looping, which also bounds the shutdown latency.
+constexpr int kPollTimeoutMs = 200;
+/// Size of one inotify read. Comfortably larger than a single event plus a name.
+constexpr std::size_t kEventBufferSize = 8192;
+/// Largest chunk read from the monitored file in one pass.
+constexpr std::size_t kReadChunkSize = 64 * 1024;
+/// A "line" longer than this is published as-is rather than buffered forever.
+constexpr std::size_t kMaxLineBytes = 1024 * 1024;
+/// Time allowed for the sink to drain when monitoring ends.
+constexpr int kFinalFlushMs = 1000;
+}  // namespace
+
+FileMonitor::FileMonitor(const std::string& filePath,
+                         const std::string& kafkaBroker,
+                         const std::string& kafkaTopic)
+    : FileMonitor(filePath, std::make_shared<KafkaSink>(kafkaBroker, kafkaTopic), kafkaTopic) {}
+
+FileMonitor::FileMonitor(const std::string& filePath,
+                         std::shared_ptr<MessageSink> sink,
+                         const std::string& topicName)
+    : filePath(filePath), topicName(topicName), sink(std::move(sink)) {
+    if (!this->sink) {
+        throw std::invalid_argument("FileMonitor requires a non-null MessageSink");
+    }
+
+    const std::filesystem::path path(filePath);
+    directoryPath = path.has_parent_path() ? path.parent_path().string() : std::string(".");
+    fileName = path.filename().string();
+
+    inotifyFd = inotify_init1(IN_CLOEXEC);
     if (inotifyFd < 0) {
         throw std::runtime_error("Failed to initialize inotify: " + std::string(strerror(errno)));
     }
-    watchFd = inotify_add_watch(inotifyFd, filePath.c_str(), IN_MODIFY);
-    if (watchFd < 0) {
-        throw std::runtime_error("Failed to add inotify watch: " + std::string(strerror(errno)));
+
+    stopFd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (stopFd < 0) {
+        const std::string reason(strerror(errno));
+        closeDescriptors();
+        throw std::runtime_error("Failed to create stop eventfd: " + reason);
+    }
+
+    struct stat fileStat {};
+    if (::stat(filePath.c_str(), &fileStat) != 0) {
+        const std::string reason(strerror(errno));
+        closeDescriptors();
+        throw std::runtime_error("Failed to stat file '" + filePath + "': " + reason);
+    }
+    watchedInode = fileStat.st_ino;
+
+    fileWatch = inotify_add_watch(inotifyFd, filePath.c_str(), kFileEvents);
+    if (fileWatch < 0) {
+        const std::string reason(strerror(errno));
+        closeDescriptors();
+        throw std::runtime_error("Failed to add inotify watch: " + reason);
+    }
+
+    // Watching the directory is what lets us survive log rotation. It is a convenience
+    // rather than a requirement, so a failure here is reported but not fatal.
+    dirWatch = inotify_add_watch(inotifyFd, directoryPath.c_str(), kDirectoryEvents);
+    if (dirWatch < 0) {
+        std::cerr << "Warning: cannot watch directory '" << directoryPath
+                  << "', rotation of '" << filePath << "' will not be detected: "
+                  << strerror(errno) << std::endl;
     }
 }
 
-/**
- * @brief Destructor for the FileMonitor class.
- *
- * This destructor is responsible for cleaning up resources used by the
- * FileMonitor instance. It removes the inotify watch, closes the inotify
- * file descriptor, and deletes the producer object to prevent memory leaks.
- */
 FileMonitor::~FileMonitor() {
-    inotify_rm_watch(inotifyFd, watchFd);
-    close(inotifyFd);
-    delete producer;
+    stop();
+    closeDescriptors();
 }
 
-/**
- * @brief Retrieves the current timestamp as a formatted string.
- *
- * This function generates a timestamp string representing the current date
- * and time, including milliseconds. The format of the returned timestamp is:
- * "YYYY-MM-DD HH:MM:SS.mmm", where:
- * - YYYY is the year
- * - MM is the month
- * - DD is the day
- * - HH is the hour (24-hour format)
- * - MM is the minute
- * - SS is the second
- * - mmm is the millisecond
- *
- * @return A string containing the current timestamp in the specified format.
- */
-std::string FileMonitor::getCurrentTimestamp() {
-    auto now = std::chrono::system_clock::now();
-    auto now_c = std::chrono::system_clock::to_time_t(now);
-    auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
-
-    char buffer[100];
-    std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", std::localtime(&now_c));
-
-    std::ostringstream timestamp;
-    timestamp << buffer << "." << std::setfill('0') << std::setw(3) << milliseconds.count();
-    return timestamp.str();
+void FileMonitor::closeDescriptors() {
+    if (inotifyFd >= 0) {
+        if (fileWatch >= 0) {
+            inotify_rm_watch(inotifyFd, fileWatch);
+            fileWatch = -1;
+        }
+        if (dirWatch >= 0) {
+            inotify_rm_watch(inotifyFd, dirWatch);
+            dirWatch = -1;
+        }
+        close(inotifyFd);
+        inotifyFd = -1;
+    }
+    if (stopFd >= 0) {
+        close(stopFd);
+        stopFd = -1;
+    }
 }
 
-/**
- * @brief Formats a message as a JSON string with metadata.
- * 
- * This function takes a file path, a line of text, a Kafka topic, and a message type,
- * and formats them into a JSON string that includes a timestamp and other metadata.
- * 
- * @param filePath The path of the file associated with the message.
- * @param line The content or line of text to include in the message.
- * @param kafkaTopic The Kafka topic to which the message is related.
- * @param messageType The type or category of the message.
- * @return A JSON-formatted string containing the provided information and a timestamp.
- */
-std::string FileMonitor::formatMessage(const std::string& filePath, const std::string& line, const std::string& kafkaTopic, const std::string& messageType) {
-    std::string timestamp = getCurrentTimestamp();
-    // Format the message as a JSON string
-    std::string formattedMessage = "{\"timestamp\": \"" + timestamp + "\", \"filePath\": \"" + filePath + "\", \"kafkaTopic\": \"" + kafkaTopic + "\", \"message\": \"" + line + "\", \"type\": \"" + messageType + "\"}";
-    return formattedMessage;
+void FileMonitor::stop() {
+    stopRequested.store(true);
+    if (stopFd >= 0) {
+        const uint64_t token = 1;
+        // write() is async-signal-safe, so stop() may be called from a signal handler.
+        const ssize_t written = ::write(stopFd, &token, sizeof(token));
+        (void)written;
+    }
 }
 
-/**
- * @brief Monitors a file for modifications and sends updates to a Kafka topic.
- *
- * This function uses inotify to monitor the specified file for changes. When a modification
- * is detected, it reads the updated content of the file and sends each line as a message
- * to a Kafka topic. The function runs indefinitely in a loop until terminated.
- *
- * @details
- * - Sends an "INIT" message to Kafka when monitoring starts.
- * - Sends an "INIT - FILE OPEN" message to Kafka after verifying the file is accessible.
- * - Monitors the file for `IN_MODIFY` events using inotify.
- * - Reads the modified file line by line and sends each line to Kafka with a "MODIFY" tag.
- * - Handles errors such as file access issues or Kafka message sending failures.
- * - Sends a "CLOSE" message to Kafka before exiting the function.
- *
- * @note This function assumes that the file path and Kafka topic are properly initialized.
- *       It also assumes that the Kafka producer is set up and accessible.
- *
- * @warning The function runs an infinite loop and does not provide a mechanism for graceful
- *          termination. Ensure proper handling to stop the loop when needed.
- *
- * @todo Add a check to ensure the file is accessible before starting monitoring.
- * @todo Implement a mechanism to gracefully terminate the infinite loop.
- */
-void FileMonitor::monitor() {
-    sendToKafka(formatMessage(filePath, " ", kafkaTopic, "INIT"));
-    char buffer[1024];
-    
-    // Open the file to check if it exists and is accessible
-    // TODO: Check if the file is accessible
+bool FileMonitor::isRunning() const {
+    return running.load();
+}
 
-    sendToKafka(formatMessage(filePath, " ", kafkaTopic, "INIT - FILE OPEN"));
-    // Start monitoring for file modifications
-    while (true) {
-        int length = read(inotifyFd, buffer, sizeof(buffer));
-        if (length < 0) {
+void FileMonitor::emit(const std::string& line, const std::string& messageType) {
+    try {
+        sink->send(sparky::formatMessage(filePath, line, topicName, messageType,
+                                         sparky::currentTimestamp()));
+    } catch (const std::exception& e) {
+        // A publish failure must not take the monitor down with it.
+        std::cerr << "Error publishing message for '" << filePath << "': " << e.what() << std::endl;
+    }
+}
+
+void FileMonitor::flushCompleteLines() {
+    std::size_t start = 0;
+    for (std::size_t newline = partialLine.find('\n', start); newline != std::string::npos;
+         newline = partialLine.find('\n', start)) {
+        std::string line = partialLine.substr(start, newline - start);
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();  // tolerate CRLF files
+        }
+        emit(line, "MODIFY");
+        start = newline + 1;
+    }
+    partialLine.erase(0, start);
+
+    // Guard against a file that never writes a newline: publish rather than grow forever.
+    if (partialLine.size() > kMaxLineBytes) {
+        emit(partialLine, "MODIFY");
+        partialLine.clear();
+    }
+}
+
+void FileMonitor::readNewData() {
+    std::ifstream file(filePath, std::ios::binary);
+    if (!file.is_open()) {
+        if (!openErrorReported) {
+            std::cerr << "Failed to open file: " << filePath << std::endl;
+            emit(" ", "ERROR - FILE OPEN");
+            openErrorReported = true;  // report once, not once per event
+        }
+        return;
+    }
+    openErrorReported = false;
+
+    file.seekg(0, std::ios::end);
+    const std::streamoff size = file.tellg();
+    if (size < 0) {
+        return;
+    }
+
+    if (size < offset) {
+        // The file shrank, so it was truncated underneath us. Start over.
+        offset = 0;
+        partialLine.clear();
+        emit(" ", "TRUNCATED");
+    }
+
+    while (offset < size) {
+        const std::size_t want =
+            static_cast<std::size_t>(std::min<std::streamoff>(kReadChunkSize, size - offset));
+        std::string chunk(want, '\0');
+
+        file.seekg(offset, std::ios::beg);
+        file.read(&chunk[0], static_cast<std::streamsize>(want));
+        const std::streamsize got = file.gcount();
+        if (got <= 0) {
+            break;
+        }
+        chunk.resize(static_cast<std::size_t>(got));
+        offset += got;
+
+        partialLine += chunk;
+        flushCompleteLines();
+    }
+}
+
+void FileMonitor::checkForReplacement() {
+    struct stat fileStat {};
+    if (::stat(filePath.c_str(), &fileStat) != 0) {
+        // Nothing at the path right now. The directory watch will tell us when that changes.
+        return;
+    }
+    if (fileStat.st_ino == watchedInode) {
+        return;
+    }
+
+    // A different file occupies the path, so the old watch is useless. Follow the new one.
+    if (fileWatch >= 0) {
+        inotify_rm_watch(inotifyFd, fileWatch);
+        fileWatch = -1;
+    }
+    const int newWatch = inotify_add_watch(inotifyFd, filePath.c_str(), kFileEvents);
+    if (newWatch < 0) {
+        std::cerr << "Failed to re-watch '" << filePath << "': " << strerror(errno) << std::endl;
+        return;
+    }
+
+    fileWatch = newWatch;
+    watchedInode = fileStat.st_ino;
+    offset = 0;
+    partialLine.clear();
+    openErrorReported = false;
+    emit(" ", "ROTATED");
+    readNewData();
+}
+
+void FileMonitor::processInotifyEvents() {
+    std::vector<char> buffer(kEventBufferSize);
+    const ssize_t length = ::read(inotifyFd, buffer.data(), buffer.size());
+    if (length <= 0) {
+        if (length < 0 && errno != EINTR && errno != EAGAIN) {
             std::cerr << "Error reading inotify events: " << strerror(errno) << std::endl;
+        }
+        return;
+    }
+
+    bool contentChanged = false;
+    bool pathChanged = false;
+
+    for (ssize_t i = 0; i + static_cast<ssize_t>(sizeof(struct inotify_event)) <= length;) {
+        const auto* event = reinterpret_cast<const struct inotify_event*>(&buffer[i]);
+
+        if (event->wd == fileWatch) {
+            if (event->mask & IN_MODIFY) {
+                contentChanged = true;
+            }
+            if (event->mask & (IN_MOVE_SELF | IN_DELETE_SELF | IN_IGNORED)) {
+                pathChanged = true;
+            }
+        } else if (event->wd == dirWatch && event->len > 0) {
+            if ((event->mask & kDirectoryEvents) && fileName == event->name) {
+                pathChanged = true;
+            }
+        }
+
+        // Always advance, whatever happened above. Skipping this is what turned a failed
+        // open into an infinite loop in the original implementation.
+        i += static_cast<ssize_t>(sizeof(struct inotify_event)) + event->len;
+    }
+
+    if (pathChanged) {
+        checkForReplacement();
+    }
+    if (contentChanged) {
+        readNewData();
+    }
+}
+
+void FileMonitor::monitor() {
+    running.store(true);
+    emit(" ", "INIT");
+
+    {
+        std::ifstream probe(filePath, std::ios::binary);
+        emit(" ", probe.is_open() ? "INIT - FILE OPEN" : "ERROR - FILE OPEN");
+    }
+
+    // Publish whatever the file already holds, then follow it from there.
+    readNewData();
+
+    struct pollfd fds[2];
+    fds[0].fd = inotifyFd;
+    fds[0].events = POLLIN;
+    fds[1].fd = stopFd;
+    fds[1].events = POLLIN;
+
+    while (!stopRequested.load()) {
+        fds[0].revents = 0;
+        fds[1].revents = 0;
+
+        const int ready = poll(fds, 2, kPollTimeoutMs);
+        if (ready < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            std::cerr << "poll() failed for '" << filePath << "': " << strerror(errno) << std::endl;
+            break;
+        }
+        if (fds[1].revents & POLLIN) {
+            break;  // stop() was called
+        }
+        if (ready == 0) {
+            // Idle tick: catches a replacement we were not notified about.
+            checkForReplacement();
             continue;
         }
-
-        for (int i = 0; i < length;) {
-            struct inotify_event* event = (struct inotify_event*)&buffer[i];
-            if (event->mask & IN_MODIFY) {
-                std::ifstream file(filePath);
-                if (!file.is_open()) {
-                    std::cerr << "Failed to open file: " << filePath << std::endl;
-                    sendToKafka(formatMessage(filePath, " ", kafkaTopic, "ERROR - FILE OPEN"));
-                    continue;
-                }
-                std::string line;
-                while (std::getline(file, line)) {
-                    try {
-                        sendToKafka(formatMessage(filePath, line, kafkaTopic, "MODIFY"));
-                    } catch (const std::exception& e) {
-                        std::cerr << "Error sending message to Kafka: " << e.what() << std::endl;
-                    }
-                }
-            }
-            i += sizeof(struct inotify_event) + event->len;
+        if (fds[0].revents & POLLIN) {
+            processInotifyEvents();
         }
     }
-    sendToKafka(formatMessage(filePath, " ", kafkaTopic, "CLOSE"));
-    producer->flush(1000);
-}
 
-/**
- * @brief Sends a message to a Kafka topic using the configured Kafka producer.
- *
- * This method produces a message to the specified Kafka topic and handles any
- * errors that may occur during the production process. If the message fails
- * to be produced, an exception is thrown with the corresponding error message.
- *
- * @param message The message to be sent to the Kafka topic.
- *
- * @throws std::runtime_error If the message fails to be produced, an exception
- *         is thrown with the error description.
- */
-void FileMonitor::sendToKafka(const std::string& message) {
-    RdKafka::ErrorCode resp = producer->produce(
-        kafkaTopic, RdKafka::Topic::PARTITION_UA,
-        RdKafka::Producer::RK_MSG_COPY,
-        const_cast<char*>(message.c_str()), message.size(),
-        nullptr, 0, 0, nullptr, nullptr);
-    if (resp != RdKafka::ERR_NO_ERROR) {
-        throw std::runtime_error("Failed to produce message: " + RdKafka::err2str(resp));
-    }
-    producer->poll(0);
+    emit(" ", "CLOSE");
+    sink->flush(kFinalFlushMs);
+    running.store(false);
 }

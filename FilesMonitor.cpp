@@ -1,132 +1,164 @@
 /**
  * @file FilesMonitor.cpp
- * @brief Implementation of the FilesMonitor class for monitoring file changes.
- * 
- * This file contains the implementation of the FilesMonitor class, which is responsible
- * for monitoring a set of files and directories for changes. It uses the FileMonitor
- * class to handle individual file monitoring and publishes file change events to a
- * specified Kafka topic.
- * 
- * The FilesMonitor class operates in a separate thread, continuously checking the
- * specified paths for changes. It supports monitoring both individual files and
- * directories, and it dynamically updates the list of monitored files as files are
- * added or removed from the filesystem.
- * 
- * Key features:
- * - Monitors files and directories for changes.
- * - Dynamically adds new files to the monitoring list.
- * - Cleans up monitors for deleted files.
- * - Publishes file change events to a Kafka topic.
- * 
+ * @brief Implementation of the FilesMonitor class.
+ *
+ * The scanning thread owns the list of active monitors. Each monitor gets a thread of
+ * its own because FileMonitor::monitor() blocks until it is told to stop, so running
+ * them inline would mean only the first file was ever followed.
+ *
  * Dependencies:
  * - C++17 filesystem library for file and directory operations.
  * - Threading and synchronization primitives for concurrent monitoring.
- * - FileMonitor class for individual file monitoring.
- * 
+ * - FileMonitor for the per-file work.
+ *
  * @author Jamster88 (mcfadden@auburn.edu)
  * @date 4/4/25
- * @todo Implement a mechanism to gracefully terminate the monitoring thread.
- * @todo Add error handling for Kafka message sending failures.
  */
-#include "FilesMonitor.h"   // Include the existing FilesMonitor header
-#include <filesystem>       // Used for std::filesystem
-#include <memory>           // Used for std::unique_ptr
-#include <thread>           // Used for std::thread
-#include <chrono>           // Used for timestamp generation
-#include <mutex>            // Used for std::mutex
-#include <vector>           // Used for std::vector
-#include <unordered_map>    // Used for std::unordered_map
-#include <iostream>         // Used for std::cerr
-#include "FileMonitor.h"    // Include the existing FileMonitor header
+
+#include "FilesMonitor.h"
+
+#include <filesystem>  // Used for std::filesystem
+#include <iostream>    // Used for std::cerr
+#include <system_error>// Used for the non-throwing filesystem overloads
+#include <utility>     // Used for std::move
+
+#include "KafkaSink.h"
 
 namespace fs = std::filesystem;
 
-/**
- * @brief Constructs a FilesMonitor object and starts a monitoring thread.
- * 
- * @param pathsToMonitor A vector of file paths to monitor for changes.
- * @param kafkaTopic The Kafka topic to which file change events will be published.
- */
-FilesMonitor::FilesMonitor(const std::vector<std::string>& pathsToMonitor, const std::string& kafkaTopic)
-    : paths(pathsToMonitor), topic(kafkaTopic), stopMonitoring(false) {
+FilesMonitor::FilesMonitor(const std::vector<std::string>& pathsToMonitor,
+                           const std::string& kafkaBroker,
+                           const std::string& kafkaTopic,
+                           std::chrono::milliseconds scanInterval)
+    : FilesMonitor(pathsToMonitor,
+                   std::make_shared<KafkaSink>(kafkaBroker, kafkaTopic),
+                   kafkaTopic,
+                   scanInterval) {}
+
+FilesMonitor::FilesMonitor(const std::vector<std::string>& pathsToMonitor,
+                           std::shared_ptr<MessageSink> sink,
+                           const std::string& topicName,
+                           std::chrono::milliseconds scanInterval)
+    : paths(pathsToMonitor),
+      sink(std::move(sink)),
+      topicName(topicName),
+      scanInterval(scanInterval) {
+    if (!this->sink) {
+        throw std::invalid_argument("FilesMonitor requires a non-null MessageSink");
+    }
     monitorThread = std::thread(&FilesMonitor::monitorLoop, this);
 }
 
-/**
- * @brief Destructor for the FilesMonitor class.
- *
- * This destructor ensures that the file monitoring process is stopped
- * gracefully. It sets the `stopMonitoring` flag to true, signaling the
- * monitoring thread to terminate. If the monitoring thread is still
- * joinable, it waits for the thread to finish execution by calling `join()`.
- */
 FilesMonitor::~FilesMonitor() {
-    stopMonitoring = true;
+    stop();
     if (monitorThread.joinable()) {
         monitorThread.join();
     }
+    stopAll();
 }
 
+void FilesMonitor::stop() {
+    stopMonitoring.store(true);
+    waitCondition.notify_all();
 
-/**
- * @brief The main loop for monitoring files and directories.
- *
- * This method continuously checks the specified paths for changes and
- * handles file modifications. It also cleans up deleted files from the
- * monitored list.
- */
+    // Wake the per-file monitors too, so their threads can be joined without waiting
+    // for the scanning thread to notice.
+    std::lock_guard<std::mutex> lock(monitorMutex);
+    for (auto& entry : fileMonitors) {
+        entry.second.monitor->stop();
+    }
+}
+
 void FilesMonitor::monitorLoop() {
-    while (!stopMonitoring) {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-        std::lock_guard<std::mutex> lock(monitorMutex);
-
-        for (const auto& path : paths) {
-            if (fs::exists(path)) {
-                if (fs::is_directory(path)) {
-                    for (const auto& entry : fs::directory_iterator(path)) {
-                        handleFile(entry.path().string());
-                    }
-                } else {
-                    handleFile(path);
-                }
-            }
+    while (!stopMonitoring.load()) {
+        {
+            std::lock_guard<std::mutex> lock(monitorMutex);
+            scanPaths();
+            cleanupDeletedFiles();
         }
 
-        cleanupDeletedFiles();
+        // Sleep, but wake immediately if stop() is called mid-interval.
+        std::unique_lock<std::mutex> wait(waitMutex);
+        waitCondition.wait_for(wait, scanInterval, [this] { return stopMonitoring.load(); });
     }
 }
 
-/**
- * @brief Handles the monitoring of a specific file.
- * 
- * This function checks if the given file is already being monitored. If not, 
- * it creates a new FileMonitor instance for the file and adds it to the 
- * fileMonitors map.
- * 
- * @param filePath The path of the file to be monitored.
- */
+void FilesMonitor::scanPaths() {
+    for (const auto& path : paths) {
+        std::error_code ec;
+        if (!fs::exists(path, ec) || ec) {
+            continue;
+        }
+
+        if (fs::is_directory(path, ec) && !ec) {
+            for (fs::directory_iterator it(path, ec), end; !ec && it != end; it.increment(ec)) {
+                std::error_code entryEc;
+                if (fs::is_regular_file(it->path(), entryEc) && !entryEc) {
+                    handleFile(it->path().string());
+                }
+            }
+        } else if (fs::is_regular_file(path, ec) && !ec) {
+            handleFile(path);
+        }
+    }
+}
+
 void FilesMonitor::handleFile(const std::string& filePath) {
-    if (fileMonitors.find(filePath) == fileMonitors.end()) {
-        fileMonitors[filePath] = std::make_unique<FileMonitor>(filePath, topic);
+    if (fileMonitors.find(filePath) != fileMonitors.end()) {
+        return;
+    }
+
+    try {
+        Watched watched;
+        watched.monitor = std::make_unique<FileMonitor>(filePath, sink, topicName);
+        // monitor() blocks until stop(), so it needs a thread of its own.
+        FileMonitor* monitor = watched.monitor.get();
+        watched.worker = std::thread([monitor] { monitor->monitor(); });
+
+        fileMonitors.emplace(filePath, std::move(watched));
+        reportedFailures.erase(filePath);
+    } catch (const std::exception& e) {
+        // One unwatchable file must not stop the others from being monitored.
+        if (reportedFailures.insert(filePath).second) {
+            std::cerr << "Failed to monitor '" << filePath << "': " << e.what() << std::endl;
+        }
     }
 }
 
-/**
- * @brief Cleans up the file monitors by removing entries for files that no longer exist.
- * 
- * This function iterates through the `fileMonitors` container and checks if the file
- * corresponding to each entry still exists in the filesystem. If a file does not exist,
- * its associated entry is removed from the `fileMonitors` container.
- * 
- * @note The function uses an iterator to safely remove elements from the container
- *       while iterating over it.
- */
 void FilesMonitor::cleanupDeletedFiles() {
     for (auto it = fileMonitors.begin(); it != fileMonitors.end();) {
-        if (!fs::exists(it->first)) {
+        std::error_code ec;
+        if (!fs::exists(it->first, ec) || ec) {
+            it->second.monitor->stop();
+            if (it->second.worker.joinable()) {
+                it->second.worker.join();
+            }
             it = fileMonitors.erase(it);
         } else {
             ++it;
         }
     }
+}
+
+void FilesMonitor::stopAll() {
+    std::lock_guard<std::mutex> lock(monitorMutex);
+    for (auto& entry : fileMonitors) {
+        entry.second.monitor->stop();
+    }
+    for (auto& entry : fileMonitors) {
+        if (entry.second.worker.joinable()) {
+            entry.second.worker.join();
+        }
+    }
+    fileMonitors.clear();
+}
+
+std::vector<std::string> FilesMonitor::monitoredFiles() const {
+    std::lock_guard<std::mutex> lock(monitorMutex);
+    std::vector<std::string> result;
+    result.reserve(fileMonitors.size());
+    for (const auto& entry : fileMonitors) {
+        result.push_back(entry.first);
+    }
+    return result;
 }
