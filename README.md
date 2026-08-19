@@ -47,6 +47,8 @@ The monitor uses **inotify**, so it builds on Linux only. From a macOS or Window
 ./docker_stuff/run_tests.sh --gtest_filter='FileMonitorTailing.*'   # a subset
 ```
 
+That is 44 GoogleTest cases covering message formatting, incremental tailing, truncation, rotation, read failures and shutdown. None of them need a Kafka broker: the monitor tests drive it through a recording `MessageSink`, and the `KafkaSink` tests use librdkafka's in-process mock cluster. The container deliberately runs as a non-root user, because `chmod 000` does not deny reads to root and the unreadable-file test would skip itself instead of testing anything.
+
 On Linux you can also build directly, given `librdkafka-dev` and `libgtest-dev`:
 
 ```sh
@@ -56,6 +58,10 @@ cd build && ctest --output-on-failure
 ```
 
 A local Kafka for manual testing lives in `docker_stuff/` (`docker compose up -d`, see `docker_stuff/commands`), and `rand_data_gen/` generates filler data to append.
+
+One trap worth knowing before testing by hand: **inotify does not fire for files on a Docker bind mount**, so editing a file in the mounted repo from a macOS or Windows host produces no events at all. Write to a path on the container's own filesystem instead (the tests use temporary directories under `/tmp` for exactly this reason).
+
+`misc/build-and-test-commands.md` has the longer version of all of this, including the manual end-to-end checks against a real broker.
 
 
 ## TO-DO
