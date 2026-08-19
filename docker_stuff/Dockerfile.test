@@ -1,0 +1,21 @@
+# Build and test environment for SparkySIEM.
+#
+# The monitor uses inotify, so it only builds on Linux; this image is how the
+# project is built and tested from a macOS or Windows host.
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        g++ \
+        cmake \
+        make \
+        libgtest-dev \
+        librdkafka-dev \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Tests run as an unprivileged user on purpose: root bypasses file permission
+# checks, which would make the "file became unreadable" test meaningless.
+RUN useradd --create-home --uid 1000 sparky
+USER sparky
+
+WORKDIR /work

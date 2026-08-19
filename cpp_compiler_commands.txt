@@ -1,1 +1,5 @@
-g++ -fdiagnostics-color=always -g main.cpp FileMonitor.cpp -o SparkySIEM -lrdkafka -lrdkafka++
+Preferred build (Linux, or via ./docker_stuff/run_tests.sh from macOS/Windows):
+cmake -S . -B build && cmake --build build
+
+Straight g++ build of the application, no tests:
+g++ -fdiagnostics-color=always -g -std=c++17 main.cpp FileMonitor.cpp KafkaSink.cpp Message.cpp -o SparkySIEM -lrdkafka -lrdkafka++

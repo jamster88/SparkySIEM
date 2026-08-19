@@ -1,0 +1,11 @@
+# CMake build trees
+build/
+cmake-build-*/
+
+# Compiled artifacts
+*.o
+SparkySIEM
+sparky_siem
+
+# IDE
+.idea/
