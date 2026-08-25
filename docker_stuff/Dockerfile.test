@@ -1,0 +1,38 @@
+# ==============================================================================
+# SparkySIEM Test Container
+# Runs all unit tests (standalone + gtest) against Kafka broker
+# ==============================================================================
+FROM ubuntu:22.04
+
+# Install build tools, librdkafka dev headers, and GoogleTest
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    gcc \
+    g++ \
+    cmake \
+    wget \
+    pkg-config \
+    librdkafka-dev \
+    libssl-dev \
+    zlib1g-dev \
+    liblz4-dev \
+    libzstd-dev \
+    libsasl2-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install GoogleTest from source (matching our installed g++ version)
+RUN mkdir -p /tmp/gtest && \
+    cd /tmp/gtest && \
+    wget -q https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz -O gtest.tar.gz && \
+    tar xzf gtest.tar.gz && \
+    cd googletest-1.14.0 && \
+    cmake . -DCMAKE_INSTALL_PREFIX=/usr/local && \
+    make && \
+    make install && \
+    ldconfig && \
+    rm -rf /tmp/gtest
+
+WORKDIR /opt/sparkysiem
+
+CMD ["bash"]

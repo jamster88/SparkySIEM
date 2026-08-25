@@ -13,7 +13,7 @@
 #include "FileMonitor.h"
 
 int main() {
-    FileMonitor monitor("/home/jamster/Repos/SparkySIEM/test.txt", "localhost:9092", "my-topic");
+    FileMonitor monitor("/tmp/test.txt", "sparkysiem_kafka:29092", "sparky-changes");
     monitor.monitor();
     return 0;
 }

@@ -1,0 +1,25 @@
+# ==============================================================================
+# SparkySIEM Build Container
+# Compiles the program for Linux (inotify + librdkafka required)
+# ==============================================================================
+FROM ubuntu:22.04
+
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    gcc \
+    g++ \
+    cmake \
+    wget \
+    pkg-config \
+    librdkafka-dev \
+    libssl-dev \
+    zlib1g-dev \
+    liblz4-dev \
+    libzstd-dev \
+    libsasl2-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/sparkysiem
+
+CMD ["bash"]

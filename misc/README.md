@@ -16,7 +16,8 @@
 - [build-test-gtest.md](build-test-gtest.md) - GoogleTest suite (34 tests, requires brew install googletest)
 - [build-test-all.md](build-test-all.md) - Unified runner script
 
-### Integration Testing
+### Docker Setup
+- [docker-run-instructions.md](docker-run-instructions.md) - Manual docker run commands for every container (broker, builder, tester, monitor)
 - [docker-kafka-setup.md](docker-kafka-setup.md) - Docker Kafka broker for end-to-end testing
 
 ## Quick Reference: Build Everything
