@@ -47,8 +47,8 @@ namespace fs = std::filesystem;
  * @param pathsToMonitor A vector of file paths to monitor for changes.
  * @param kafkaTopic The Kafka topic to which file change events will be published.
  */
-FilesMonitor::FilesMonitor(const std::vector<std::string>& pathsToMonitor, const std::string& kafkaTopic)
-    : paths(pathsToMonitor), topic(kafkaTopic), stopMonitoring(false) {
+FilesMonitor::FilesMonitor(const std::vector<std::string>& pathsToMonitor, const std::string& kafkaBroker, const std::string& kafkaTopic)
+    : paths(pathsToMonitor), kafkaBroker(kafkaBroker), kafkaTopic(kafkaTopic), stopMonitoring(false) {
     monitorThread = std::thread(&FilesMonitor::monitorLoop, this);
 }
 
@@ -107,7 +107,7 @@ void FilesMonitor::monitorLoop() {
  */
 void FilesMonitor::handleFile(const std::string& filePath) {
     if (fileMonitors.find(filePath) == fileMonitors.end()) {
-        fileMonitors[filePath] = std::make_unique<FileMonitor>(filePath, topic);
+        fileMonitors[filePath] = std::make_unique<FileMonitor>(filePath, kafkaBroker, kafkaTopic);
     }
 }
 

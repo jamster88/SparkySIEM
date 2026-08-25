@@ -47,9 +47,10 @@ public:
     /**
      * @brief Constructs a FilesMonitor object.
      * @param pathsToMonitor A vector of file and directory paths to monitor.
+     * @param kafkaBroker The Kafka broker address to connect to.
      * @param kafkaTopic The Kafka topic to which messages will be sent.
      */
-    FilesMonitor(const std::vector<std::string>& pathsToMonitor, const std::string& kafkaTopic);
+    FilesMonitor(const std::vector<std::string>& pathsToMonitor, const std::string& kafkaBroker, const std::string& kafkaTopic);
 
     /**
      * @brief Destroys the FilesMonitor object and releases resources.
@@ -57,8 +58,9 @@ public:
     ~FilesMonitor();
 
 private:
-    std::vector<std::string> paths; ///< Vector of file and directory paths to monitor
-    std::string topic;              ///< Kafka topic to which messages will be sent
+    std::vector<std::string> paths;       ///< Vector of file and directory paths to monitor
+    std::string kafkaBroker;              ///< Kafka broker address
+    std::string kafkaTopic;               ///< Kafka topic to which messages will be sent
     std::unordered_map<std::string, std::unique_ptr<FileMonitor>> fileMonitors; ///< Map of file monitors
     std::thread monitorThread;      ///< Thread for monitoring files
     std::mutex monitorMutex;        ///< Mutex for thread safety
