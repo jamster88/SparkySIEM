@@ -60,5 +60,56 @@ cd tests
 
 ---
 
+## Docker Setup
+
+SparkySIEM runs inside Linux containers (inotify is Linux-only). The `docker_stuff/` directory contains everything needed to build, test, and run end-to-end.
+
+### Quick Start (Compose)
+
+```bash
+# Build images and start Kafka + builder + tester
+docker compose up -d kafka        # Kafka broker on port 9092
+docker compose build sparkysiem-builder sparkysiem-tester
+
+# Compile inside the builder container
+docker exec sparkysiem_builder sh -c 'cd /opt/sparkysiem/src && g++ -std=c++17 -I/usr/include FileFormat.cpp FileMonitor.cpp main.cpp -o build/file_monitor -L/usr/lib -lrdkafka++ -lrdkafka -lpthread -lz -lssl -lcrypto'
+
+# Run tests inside the tester container
+docker exec sparkysiem_tester sh -c 'cd /opt/sparkysiem/src/tests && g++ -std=c++17 -I.. test_runner.cpp ../FileFormat.cpp -o build/test_runner && ./build/test_runner'
+
+# Run the monitor (writes to Kafka topic "sparky-changes")
+docker run --rm --network sparkysiem-net -v .:/opt/sparkysiem/src sparkysiem-builder /opt/sparkysiem/src/build/file_monitor
+```
+
+See [`misc/docker-run-instructions.md`](misc/docker-run-instructions.md) for full manual `docker run` commands, test instructions, and cleanup.
+
+### Docker Architecture
+
+| Service | Image | Purpose |
+|---------|-------|---------|
+| `sparkysiem_kafka` | `apache/kafka:latest` | Kafka broker (topic `sparky-changes`) |
+| `sparkysiem-builder` | `docker_stuff/Dockerfile.build` | Compile-time deps (gcc, cmake, librdkafka-dev, GoogleTest) |
+| `sparkysiem-tester` | `docker_stuff/Dockerfile.test` | Runtime deps + GoogleTest for running tests |
+
+All containers share a Docker network (`sparkysiem-net`) for DNS-based discovery. The broker is reachable at `sparkysiem_kafka:29092` from other containers and at `localhost:9092` from the host.
+
+---
+
+## Building Manually (Linux)
+
+### Production binaries
+
+```bash
+# Single-file monitor (inotify + Kafka)
+g++ -std=c++17 FileFormat.cpp FileMonitor.cpp main.cpp -o file_monitor \
+  -L/usr/lib -lrdkafka++ -lrdkafka -lpthread -lz -lssl -lcrypto
+
+# Multi-file/directory monitor
+g++ -std=c++17 FileFormat.cpp FilesMonitor.cpp main.cpp -o files_monitor \
+  -L/usr/lib -lrdkafka++ -lrdkafka -lpthread -lz -lssl -lcrypto
+```
+
+---
+
 ## docker_stuff
 

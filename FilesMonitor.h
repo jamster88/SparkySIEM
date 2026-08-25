@@ -48,12 +48,8 @@ public:
      * @brief Constructs a FilesMonitor object.
      * @param pathsToMonitor A vector of file and directory paths to monitor.
      * @param kafkaTopic The Kafka topic to which messages will be sent.
-     */
-    /**
-     * @brief Constructs a FilesMonitor object.
-     * @param pathsToMonitor A vector of file and directory paths to monitor.
-     * @param kafkaTopic The Kafka topic to which messages will be sent.
-     * @param kafkaBroker The Kafka broker address (default: "localhost:9092").
+     * @param kafkaBroker The Kafka broker address (default: "localhost:9092";
+     *                    use "sparkysiem_kafka:29092" when running inside Docker Compose).
      */
     FilesMonitor(const std::vector<std::string>& pathsToMonitor, const std::string& kafkaTopic,
                  const std::string& kafkaBroker = "localhost:9092");

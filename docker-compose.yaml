@@ -1,3 +1,15 @@
+# SparkySIEM Docker Compose — builds + runs everything for development & testing.
+#
+# Services:
+#   kafka              — Kafka broker (topic "sparky-changes") on port 9092
+#   sparkysiem-builder — compile image (gcc, cmake, librdkafka-dev, GoogleTest)
+#   sparkysiem-tester  — test runtime (GoogleTest + runtime deps)
+#
+# Quick start:
+#   docker compose up -d kafka
+#   docker compose build sparkysiem-builder sparkysiem-tester
+#   docker exec sparkysiem_builder sh -c 'cd /opt/sparkysiem/src && g++ ...'
+
 services:
   kafka:
     image: apache/kafka:latest

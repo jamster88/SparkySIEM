@@ -55,9 +55,10 @@ class FileMonitor {
 public:
     /**
      * @brief Constructs a FileMonitor object.
-     * @param filePath The path of the file to monitor.
-     * @param kafkaBroker The address of the Kafka broker.
-     * @param kafkaTopic The Kafka topic to which messages will be sent.
+     * @param filePath   Path of the file to monitor (inotify is Linux-only).
+     * @param kafkaBroker Kafka broker address — use "sparkysiem_kafka:29092" inside Docker
+     *                    Compose, or "localhost:9092" when connecting to a host-local broker.
+     * @param kafkaTopic  Topic to which change events will be published.
      */
     FileMonitor(const std::string& filePath, const std::string& kafkaBroker, const std::string& kafkaTopic);
 
