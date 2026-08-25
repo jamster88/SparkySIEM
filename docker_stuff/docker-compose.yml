@@ -1,0 +1,93 @@
+version: '3.8'
+
+services:
+  # Kafka broker for testing
+  kafka:
+    image: apache/kafka:3.7.0
+    hostname: kafka
+    container_name: sparky_siem_kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  # Test container - uses existing gtest and runs the tests
+  test-runner:
+    image: ubuntu:22.04
+    container_name: sparky_siem_test_runner
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER: kafka:9092
+      KAFKA_TOPIC: sparky-siem-test
+    volumes:
+      - ..:/sparky_siem:ro
+      - ./commands:/opt/kafka/bin/commands:ro
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        echo "Installing dependencies..."
+        apt-get update && apt-get install -y \
+          g++ \
+          make \
+          wget \
+          curl \
+          pkg-config \
+          apt-transport-https \
+          && rm -rf /var/lib/apt/lists/*
+
+        echo "Installing librdkafka..."
+        wget -qO- https://packages.confluent.io/deb/7.6/archive.key | gpg --dearmor -o /usr/share/keyrings/confluent-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/confluent-archive-keyring.gpg] https://packages.confluent.io/deb/7.6 stable main" > /etc/apt/sources.list.d/confluent.list
+        apt-get update && apt-get install -y librdkafka-dev && rm -rf /var/lib/apt/lists/*
+
+        echo "Installing Google Test..."
+        apt-get install -y libgtest-dev
+        cd /usr/src/googletest && mkdir build && cd build && cmake .. && make && make install
+
+        echo "Compiling tests..."
+        g++ -std=c++17 \
+          -I/usr/include \
+          /sparky_siem/test/standalone_tests.cpp \
+          /usr/lib/x86_64-linux-gnu/libgtest.a \
+          -o /sparky_siem/test/filemonitor_tests \
+          -pthread
+
+        g++ -std=c++17 \
+          -I/usr/include \
+          /sparky_siem/test/standalone_filesmonitor_tests.cpp \
+          /usr/lib/x86_64-linux-gnu/libgtest.a \
+          -o /sparky_siem/test/filesmonitor_tests \
+          -pthread
+
+        echo "Running unit tests..."
+        /sparky_siem/test/filemonitor_tests
+        /sparky_siem/test/filesmonitor_tests
+        echo "All tests completed!"
+
+volumes:
+  kafka_data:
+
+networks:
+  default:
+    name: sparky_siem_network
