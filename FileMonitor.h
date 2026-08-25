@@ -76,20 +76,10 @@ public:
 
 private:
     /**
-     * @brief Retrieves the current timestamp in a formatted string.
-     * @return A string representing the current timestamp.
+     * @brief Formats a message as JSON and sends it to Kafka.
+     * Delegates to FileFormat::formatMessage for JSON escaping.
      */
-    std::string getCurrentTimestamp();
-
-    /**
-     * @brief Formats a message to be sent to the Kafka topic.
-     * @param filePath The path of the file being monitored.
-     * @param line The content of the line that triggered the event.
-     * @param kafkaTopic The Kafka topic to which the message will be sent.
-     * @param messageType The type of message (e.g., "MODIFY", "DELETE").
-     * @return A formatted string containing the message.
-     */
-    std::string formatMessage(const std::string& filePath, const std::string& line, const std::string& kafkaTopic, const std::string& messageType);
+    void formatAndSend(const std::string& line, const std::string& messageType);
 
     /**
      * @brief Sends a message to the Kafka topic.
