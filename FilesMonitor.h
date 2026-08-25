@@ -1,6 +1,6 @@
 /**
  * @class FilesMonitor
- * @brief A class for monitoring files and directories and sending updates to a Kafka topic.
+ * @brief A class for monitoring multiple files and directories and sending updates to a Kafka topic.
  *
  * The FilesMonitor class provides functionality to monitor a list of files and directories
  * for changes. It uses a background thread to continuously monitor the specified paths
@@ -19,6 +19,8 @@
  * @author Jamster88 (mcfadden@auburn.edu)
  * @date 4/4/25
  * @warning This class assumes that the file paths and Kafka topic are valid and accessible.
+ * @warning This class requires the inotify API which is Linux-specific. For cross-platform
+ *          compatibility, consider using platform abstraction or conditional compilation.
  */
 
 #ifndef FILESMONITOR_H

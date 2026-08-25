@@ -1,32 +1,40 @@
 /**
  * @file FilesMonitor.cpp
  * @brief Implementation of the FilesMonitor class for monitoring file changes.
- * 
+ *
  * This file contains the implementation of the FilesMonitor class, which is responsible
  * for monitoring a set of files and directories for changes. It uses the FileMonitor
  * class to handle individual file monitoring and publishes file change events to a
  * specified Kafka topic.
- * 
+ *
  * The FilesMonitor class operates in a separate thread, continuously checking the
  * specified paths for changes. It supports monitoring both individual files and
  * directories, and it dynamically updates the list of monitored files as files are
  * added or removed from the filesystem.
- * 
+ *
  * Key features:
  * - Monitors files and directories for changes.
  * - Dynamically adds new files to the monitoring list.
  * - Cleans up monitors for deleted files.
  * - Publishes file change events to a Kafka topic.
- * 
+ *
  * Dependencies:
  * - C++17 filesystem library for file and directory operations.
  * - Threading and synchronization primitives for concurrent monitoring.
  * - FileMonitor class for individual file monitoring.
- * 
+ *
+ * @note This class uses std::this_thread::sleep_for() in the main loop to
+ *       prevent busy-waiting. Adjust the sleep duration based on your
+ *       responsiveness requirements and system load.
+ *
+ * @note The monitorLoop() runs in a separate thread. Use stopMonitoring
+ *       flag to signal the thread to exit (currently not implemented).
+ *
  * @author Jamster88 (mcfadden@auburn.edu)
  * @date 4/4/25
  * @todo Implement a mechanism to gracefully terminate the monitoring thread.
  * @todo Add error handling for Kafka message sending failures.
+ * @todo Support monitoring subdirectories recursively.
  */
 #include "FilesMonitor.h"   // Include the existing FilesMonitor header
 #include <filesystem>       // Used for std::filesystem
@@ -41,14 +49,25 @@
 
 namespace fs = std::filesystem;
 
+// ============================================================================
+// FilesMonitor Class Implementation
+// ============================================================================
+
 /**
  * @brief Constructs a FilesMonitor object and starts a monitoring thread.
- * 
+ *
  * @param pathsToMonitor A vector of file paths to monitor for changes.
+ * @param kafkaBroker The Kafka broker address to connect to.
  * @param kafkaTopic The Kafka topic to which file change events will be published.
+ *
+ * @note The monitoring thread starts immediately after construction.
+ *       Use the destructor to stop monitoring and join the thread.
+ *
+ * @todo Add error handling for invalid paths or Kafka connection failures.
  */
 FilesMonitor::FilesMonitor(const std::vector<std::string>& pathsToMonitor, const std::string& kafkaBroker, const std::string& kafkaTopic)
     : paths(pathsToMonitor), kafkaBroker(kafkaBroker), kafkaTopic(kafkaTopic), stopMonitoring(false) {
+    // Start the monitoring thread
     monitorThread = std::thread(&FilesMonitor::monitorLoop, this);
 }
 
@@ -59,6 +78,11 @@ FilesMonitor::FilesMonitor(const std::vector<std::string>& pathsToMonitor, const
  * gracefully. It sets the `stopMonitoring` flag to true, signaling the
  * monitoring thread to terminate. If the monitoring thread is still
  * joinable, it waits for the thread to finish execution by calling `join()`.
+ *
+ * @note The current implementation does not support stopping the monitoring
+ *       thread. The stopMonitoring flag exists but is not checked in the
+ *       monitorLoop(). Update monitorLoop() to check stopMonitoring for
+ *       proper shutdown support.
  */
 FilesMonitor::~FilesMonitor() {
     stopMonitoring = true;
@@ -74,59 +98,83 @@ FilesMonitor::~FilesMonitor() {
  * This method continuously checks the specified paths for changes and
  * handles file modifications. It also cleans up deleted files from the
  * monitored list.
+ *
+ * @details
+ * - Checks all paths in the `paths` vector every second.
+ * - For directories, iterates through all files and adds them to monitoring.
+ * - For individual files, adds them directly to the monitoring list.
+ * - Calls cleanupDeletedFiles() after each iteration to remove deleted files.
+ *
+ * @note This method runs in a separate thread and never returns.
+ *       Use the stopMonitoring flag to signal termination.
+ *
+ * @todo Implement proper shutdown by checking stopMonitoring periodically.
  */
 void FilesMonitor::monitorLoop() {
+    // Polling interval in seconds
+    const std::chrono::seconds pollInterval(1);
+
     while (!stopMonitoring) {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+        std::this_thread::sleep_for(pollInterval);
         std::lock_guard<std::mutex> lock(monitorMutex);
 
+        // Check each path in the monitoring list
         for (const auto& path : paths) {
             if (fs::exists(path)) {
                 if (fs::is_directory(path)) {
+                    // Monitor all files in the directory
                     for (const auto& entry : fs::directory_iterator(path)) {
                         handleFile(entry.path().string());
                     }
                 } else {
+                    // Monitor the individual file
                     handleFile(path);
                 }
             }
         }
 
+        // Clean up monitors for files that no longer exist
         cleanupDeletedFiles();
     }
 }
 
 /**
  * @brief Handles the monitoring of a specific file.
- * 
- * This function checks if the given file is already being monitored. If not, 
- * it creates a new FileMonitor instance for the file and adds it to the 
+ *
+ * This function checks if the given file is already being monitored. If not,
+ * it creates a new FileMonitor instance for the file and adds it to the
  * fileMonitors map.
- * 
+ *
  * @param filePath The path of the file to be monitored.
+ *
+ * @note This function does not create new FileMonitor instances for already
+ *       monitored files, preventing duplicates.
  */
 void FilesMonitor::handleFile(const std::string& filePath) {
+    // Check if file is already being monitored
     if (fileMonitors.find(filePath) == fileMonitors.end()) {
+        // Create new FileMonitor for this file
         fileMonitors[filePath] = std::make_unique<FileMonitor>(filePath, kafkaBroker, kafkaTopic);
     }
 }
 
 /**
  * @brief Cleans up the file monitors by removing entries for files that no longer exist.
- * 
+ *
  * This function iterates through the `fileMonitors` container and checks if the file
  * corresponding to each entry still exists in the filesystem. If a file does not exist,
- * its associated entry is removed from the `fileMonitors` container.
- * 
+ * its associated entry is removed.
+ *
  * @note The function uses an iterator to safely remove elements from the container
- *       while iterating over it.
+ *       while iterating over it. The erase() method returns the next valid iterator,
+ *       which is used to continue iteration.
  */
 void FilesMonitor::cleanupDeletedFiles() {
     for (auto it = fileMonitors.begin(); it != fileMonitors.end();) {
         if (!fs::exists(it->first)) {
-            it = fileMonitors.erase(it);
+            it = fileMonitors.erase(it);  // Remove and advance iterator
         } else {
-            ++it;
+            ++it;  // Advance iterator for non-deleted files
         }
     }
 }

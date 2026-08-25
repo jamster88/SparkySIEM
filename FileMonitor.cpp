@@ -47,22 +47,74 @@
 #include <errno.h>                 // Used for errno
 #include <chrono>                  // Used for timestamp generation
 
+// ============================================================================
+// Global helper functions
+// ============================================================================
+
+/**
+ * @brief Generates a timestamp string in the format "YYYY-MM-DD HH:MM:SS.mmm".
+ *
+ * This function uses std::chrono to capture the current time with millisecond
+ * precision and formats it using std::strftime for the date/time portion.
+ *
+ * @return std::string The current timestamp formatted as "YYYY-MM-DD HH:MM:SS.mmm"
+ */
+std::string getCurrentTimestamp() {
+    auto now = std::chrono::system_clock::now();
+    auto now_c = std::chrono::system_clock::to_time_t(now);
+    auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+
+    char buffer[100];
+    std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", std::localtime(&now_c));
+
+    std::ostringstream timestamp;
+    timestamp << buffer << "." << std::setfill('0') << std::setw(3) << milliseconds.count();
+    return timestamp.str();
+}
+
+/**
+ * @brief Formats a message as a JSON string with metadata.
+ *
+ * This function takes file path, content, topic, and message type to create
+ * a JSON-formatted message for Kafka. The timestamp is automatically generated.
+ *
+ * @param filePath The path of the file associated with the event
+ * @param line The content or line that triggered the event
+ * @param kafkaTopic The Kafka topic the message will be sent to
+ * @param messageType The type of event (INIT, MODIFY, ERROR, etc.)
+ * @return std::string JSON-formatted message string
+ */
+std::string formatMessage(const std::string& filePath, const std::string& line,
+                          const std::string& kafkaTopic, const std::string& messageType) {
+    std::string timestamp = getCurrentTimestamp();
+    std::string formattedMessage = "{\"timestamp\": \"" + timestamp + "\", "
+                                 "\"filePath\": \"" + filePath + "\", "
+                                 "\"kafkaTopic\": \"" + kafkaTopic + "\", "
+                                 "\"message\": \"" + line + "\", "
+                                 "\"type\": \"" + messageType + "\"}";
+    return formattedMessage;
+}
+
 /**
  * @brief Constructs a FileMonitor object to monitor a file for modifications and send events to a Kafka topic.
- * 
+ *
  * @param filePath The path of the file to monitor for modifications.
  * @param kafkaBroker The Kafka broker address to connect to.
  * @param kafkaTopic The Kafka topic to which file modification events will be sent.
- * 
+ *
  * @throws std::runtime_error If Kafka producer initialization fails or inotify setup fails.
- * 
+ *
  * This constructor initializes the Kafka producer with the specified broker and topic,
  * and sets up inotify to monitor the specified file for modifications. If any of these
  * steps fail, an exception is thrown with an appropriate error message.
+ *
+ * @note The inotify watch is configured for IN_MODIFY events only. To monitor other
+ *       events (create, delete, etc.), add the corresponding flags to inotify_add_watch.
  */
 FileMonitor::FileMonitor(const std::string& filePath, const std::string& kafkaBroker, const std::string& kafkaTopic)
     : filePath(filePath), kafkaBroker(kafkaBroker), kafkaTopic(kafkaTopic) {
     // Initialize Kafka producer
+    // Configuration options: https://github.com/edenhill/librdkafka/blob/master/CONFIGURATION.md
     std::string errstr;
     RdKafka::Conf* conf = RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL);
     if (conf->set("bootstrap.servers", kafkaBroker, errstr) != RdKafka::Conf::CONF_OK) {
@@ -74,11 +126,13 @@ FileMonitor::FileMonitor(const std::string& filePath, const std::string& kafkaBr
     }
     delete conf;
 
-    // Initialize inotify
+    // Initialize inotify for file monitoring
+    // inotify API: https://man7.org/linux/man-pages/man7/inotify.7.html
     inotifyFd = inotify_init();
     if (inotifyFd < 0) {
         throw std::runtime_error("Failed to initialize inotify: " + std::string(strerror(errno)));
     }
+    // Watch for IN_MODIFY events (file modifications)
     watchFd = inotify_add_watch(inotifyFd, filePath.c_str(), IN_MODIFY);
     if (watchFd < 0) {
         throw std::runtime_error("Failed to add inotify watch: " + std::string(strerror(errno)));
@@ -171,14 +225,16 @@ std::string FileMonitor::formatMessage(const std::string& filePath, const std::s
  * @todo Implement a mechanism to gracefully terminate the infinite loop.
  */
 void FileMonitor::monitor() {
+    // Send initialization message to Kafka
     sendToKafka(formatMessage(filePath, " ", kafkaTopic, "INIT"));
     char buffer[1024];
-    
+
     // Open the file to check if it exists and is accessible
     // TODO: Check if the file is accessible
-
     sendToKafka(formatMessage(filePath, " ", kafkaTopic, "INIT - FILE OPEN"));
+
     // Start monitoring for file modifications
+    // The inotify read() call blocks until events are available
     while (true) {
         int length = read(inotifyFd, buffer, sizeof(buffer));
         if (length < 0) {
@@ -186,9 +242,12 @@ void FileMonitor::monitor() {
             continue;
         }
 
+        // Process inotify events
+        // Each event is preceded by its length to handle multiple events in one read
         for (int i = 0; i < length;) {
             struct inotify_event* event = (struct inotify_event*)&buffer[i];
             if (event->mask & IN_MODIFY) {
+                // File was modified - read and send content
                 std::ifstream file(filePath);
                 if (!file.is_open()) {
                     std::cerr << "Failed to open file: " << filePath << std::endl;
@@ -196,6 +255,7 @@ void FileMonitor::monitor() {
                     continue;
                 }
                 std::string line;
+                // Send each line of the file as a separate message
                 while (std::getline(file, line)) {
                     try {
                         sendToKafka(formatMessage(filePath, line, kafkaTopic, "MODIFY"));
@@ -204,9 +264,11 @@ void FileMonitor::monitor() {
                     }
                 }
             }
+            // Move to next event: sizeof(inotify_event) + filename length
             i += sizeof(struct inotify_event) + event->len;
         }
     }
+    // This code is unreachable due to the infinite loop above
     sendToKafka(formatMessage(filePath, " ", kafkaTopic, "CLOSE"));
     producer->flush(1000);
 }

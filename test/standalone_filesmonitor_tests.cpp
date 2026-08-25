@@ -3,6 +3,16 @@
  * @brief Standalone tests for FilesMonitor without platform dependencies
  *
  * Tests verify the logic of FilesMonitor class without requiring inotify or Kafka.
+ * These tests can be run on any platform including macOS and Windows.
+ *
+ * Test categories:
+ * - Path manipulation tests: Verify directory and file path handling
+ * - FilesMonitor path management tests: Verify path tracking logic
+ * - FilesMonitor map management tests: Verify file monitoring map operations
+ * - FilesMonitor cleanup tests: Verify file removal from monitoring
+ * - FilesMonitor thread simulation tests: Verify concurrent access handling
+ * - FilesMonitor handleFile logic tests: Verify file monitoring setup
+ * - Integration-style tests: Verify end-to-end functionality
  */
 
 #include <gtest/gtest.h>

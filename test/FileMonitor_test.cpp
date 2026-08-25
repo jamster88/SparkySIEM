@@ -7,6 +7,12 @@
  *
  * Note: Full integration tests with inotify and Kafka require a Linux environment.
  * This file contains unit tests for the non-platform-specific logic.
+ *
+ * Test categories:
+ * - Timestamp tests: Verify timestamp format and uniqueness
+ * - Message format tests: Verify JSON message structure
+ * - File system tests: Verify file existence and reading
+ * - Thread safety tests: Verify concurrent access handling
  */
 
 #include <gtest/gtest.h>

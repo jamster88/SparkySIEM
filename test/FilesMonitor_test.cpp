@@ -7,6 +7,14 @@
  *
  * Note: Full integration tests with inotify require a Linux environment.
  * This file contains unit tests for the non-platform-specific logic.
+ *
+ * Test categories:
+ * - Directory setup tests: Verify test directory creation
+ * - File operations tests: Verify file creation, reading, modification
+ * - Directory iteration tests: Verify directory traversal
+ * - Symlink tests: Verify symbolic link handling
+ * - Concurrent access tests: Verify thread safety
+ * - Cleanup tests: Verify directory and file removal
  */
 
 #include <gtest/gtest.h>

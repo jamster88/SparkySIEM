@@ -3,7 +3,16 @@
  * @brief Standalone tests that don't depend on platform-specific features
  *
  * These tests verify the basic functionality of the file monitoring system
- * without requiring inotify (Linux-specific) or Kafka.
+ * without requiring inotify (Linux-specific) or Kafka. They can be run on
+ * any platform including macOS and Windows.
+ *
+ * Test categories:
+ * - Timestamp tests: Verify timestamp format and uniqueness
+ * - Message format tests: Verify JSON message structure
+ * - File system tests: Verify file operations (create, read, write)
+ * - JSON parsing tests: Verify JSON structure validity
+ * - String manipulation tests: Verify string operations
+ * - Thread safety tests: Verify concurrent access handling
  */
 
 #include <gtest/gtest.h>
