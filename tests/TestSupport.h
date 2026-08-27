@@ -154,6 +154,19 @@ inline std::vector<std::string> typesOf(const std::vector<std::string>& messages
     return types;
 }
 
+/// Every message whose "filePath" equals @p path, in order. Lets the FilesMonitor tests
+/// pick one file's traffic out of a sink that several monitors share.
+inline std::vector<std::string> messagesFor(const std::vector<std::string>& messages,
+                                            const std::string& path) {
+    std::vector<std::string> forPath;
+    for (const auto& message : messages) {
+        if (parseMessage(message).at("filePath").get<std::string>() == path) {
+            forPath.push_back(message);
+        }
+    }
+    return forPath;
+}
+
 /// The "message" field of every message whose "type" equals @p type, in order.
 inline std::vector<std::string> bodiesOfType(const std::vector<std::string>& messages,
                                              const std::string& type) {

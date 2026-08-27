@@ -43,6 +43,16 @@ This is designed to send the data to a Kafka instance with the expectation that 
 `MessageFormat` builds the JSON and the timestamps for all of the above. Splitting the
 destination out behind `MessageSink` is what lets the monitors be tested without Kafka.
 
+`FilesMonitor` is the part that turns "a file" into "a group of files". What it guarantees:
+
+* a path may be a file or a directory, and the two can be mixed in one argument list
+* a path that does not exist yet is not an error; it is picked up when it appears
+* a file appearing in a watched directory is monitored from the next scan
+* a file that disappears has its monitor stopped and its `CLOSE` published
+* listing a directory and a file inside it does not monitor that file twice
+* one bad path is reported once and skipped; the others carry on
+* `stop()` starts the shutdown from any thread, and the destructor joins every thread
+
 
 ## Requirements
 
@@ -79,9 +89,11 @@ cd docker_stuff && docker compose up -d && cd ..
 ./build/SparkySIEM localhost:9092 my-topic /var/log/app.log
 ```
 
-Each path may be a file or a directory. Directories are scanned once a second, so files
-created later are picked up, and files that disappear have their monitor shut down.
-Ctrl-C stops everything cleanly.
+Each path may be a file or a directory, and the two may be mixed. Directories are scanned
+once a second (`FilesMonitor::kDefaultScanInterval`; the constructor takes another value,
+which is what the tests use), so files created later are picked up and files that
+disappear have their monitor shut down. A path that does not exist yet is monitored once
+it appears. Ctrl-C or SIGTERM stops everything cleanly and flushes the producer.
 
 
 ## Testing
@@ -96,9 +108,20 @@ make test                                             # on a Linux host, directl
 never leaves artifacts in the working tree. The tests use an in-memory `MessageSink`
 instead of a broker, so no Kafka instance is needed to run them.
 
-`misc/build-and-test-commands.md` has the fuller reference: per-component build and test
+The suite is 64 tests across 16 suites: `EscapeJson.*`, `FormatMessage.*` and
+`CurrentTimestamp.*` for the message helpers, `FileMonitor*.*` for the single-file
+monitor, and `FilesMonitor*.*` for the group monitor. Several of the group-monitor tests
+assert on timing, so `--gtest_repeat` with `--gtest_shuffle` is the run that matters after
+changing the scan or shutdown paths.
+
+Two fuller references live in `misc/`, one per piece of work: per-component build and test
 commands, the Kafka topic commands, an end-to-end recipe against a real broker, and the
 mutation-testing procedure used to check that the suite actually catches regressions.
+
+| reference | covers |
+| --- | --- |
+| `misc/build-and-test-commands.md` | the single-file monitor; describes the suite at its earlier size of 45 tests |
+| `misc/group-monitor-build-and-test-commands.md` | the group monitor, and the current suite totals |
 
 
 ## Message format
@@ -142,7 +165,16 @@ newline arrives, so a partially written record is never forwarded in halves.
 | `tests/` | GoogleTest suite and its helpers |
 | `docker_stuff/` | Kafka broker for local testing |
 | `rand_data_gen/` | generator for synthetic log data |
-| `misc/` | session notes: verification transcript, commands run, build and test reference |
+| `misc/` | session notes: verification transcripts, commands run, build and test references |
+
+`misc/` holds one set of notes per piece of work, kept separate so each records the state
+of the code at the time it was written:
+
+| single-file monitor (`FileMonitor`) | group monitor (`FilesMonitor`) |
+| --- | --- |
+| `session-transcript.md` | `group-monitor-session-transcript.md` |
+| `session-commands.sh` | `group-monitor-session-commands.sh` |
+| `build-and-test-commands.md` | `group-monitor-build-and-test-commands.md` |
 
 Two leftovers worth knowing about: the `SparkySIEM` binary committed at the repository
 root is a stale x86-64 Linux build of the pre-fix code, kept from an earlier commit, and
@@ -159,6 +191,18 @@ root is a stale x86-64 Linux build of the pre-fix code, kept from an earlier com
   been consumed, in the style of Splunk's fishbucket.
 * There is no persistent state, so restarting republishes the current contents of every
   monitored file.
+* Every monitored file costs one thread and one inotify instance. `inotify` allows
+  `/proc/sys/fs/inotify/max_user_instances` of those per user, commonly 128, so a
+  directory holding more files than that leaves the extras unwatched: each is reported
+  once on stderr and skipped, and the files that fit are unaffected. Measured with the
+  limit lowered to 20 and 40 files present: 20 monitored, 20 reports, no retry storm.
+* Non-regular files in a monitored directory (FIFOs, sockets, nested directories) are
+  skipped rather than followed.
+* Files are de-duplicated by the path string, so listing a directory and a file inside it
+  is free, but the same file reached by two different spellings — through a symlink, or a
+  path containing `..` — is monitored twice and its lines published twice.
+* A monitor whose loop exits on its own, after a `poll()` failure, is not restarted; its
+  entry stays until the file disappears or the process ends.
 * `ConfigReader.cpp` is still empty; broker, topic and paths come from the command line.
 
 
@@ -167,5 +211,7 @@ root is a stale x86-64 Linux build of the pre-fix code, kept from an earlier com
 * Persistent read positions so a restart resumes instead of replaying
 * Config file support (`ConfigReader`)
 * Recursive directory monitoring
+* One shared inotify instance across the monitors, so the per-user instance limit stops
+  capping how many files can be watched
 * TLS to the broker
 * Feature work planning
