@@ -35,6 +35,7 @@
  */
 
 #include "FileMonitor.h"
+#include "FileFormat.h"  // Pure formatting utilities (timestamp, JSON escaping)
 #include <librdkafka/rdkafkacpp.h> // Used for Kafka producer
 #include <sys/inotify.h>           // Used for inotify functions
 #include <unistd.h>                // Used for close()
@@ -99,51 +100,11 @@ FileMonitor::~FileMonitor() {
 }
 
 /**
- * @brief Retrieves the current timestamp as a formatted string.
- *
- * This function generates a timestamp string representing the current date
- * and time, including milliseconds. The format of the returned timestamp is:
- * "YYYY-MM-DD HH:MM:SS.mmm", where:
- * - YYYY is the year
- * - MM is the month
- * - DD is the day
- * - HH is the hour (24-hour format)
- * - MM is the minute
- * - SS is the second
- * - mmm is the millisecond
- *
- * @return A string containing the current timestamp in the specified format.
+ * @brief Formats a message as JSON and sends it to Kafka.
  */
-std::string FileMonitor::getCurrentTimestamp() {
-    auto now = std::chrono::system_clock::now();
-    auto now_c = std::chrono::system_clock::to_time_t(now);
-    auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
-
-    char buffer[100];
-    std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", std::localtime(&now_c));
-
-    std::ostringstream timestamp;
-    timestamp << buffer << "." << std::setfill('0') << std::setw(3) << milliseconds.count();
-    return timestamp.str();
-}
-
-/**
- * @brief Formats a message as a JSON string with metadata.
- * 
- * This function takes a file path, a line of text, a Kafka topic, and a message type,
- * and formats them into a JSON string that includes a timestamp and other metadata.
- * 
- * @param filePath The path of the file associated with the message.
- * @param line The content or line of text to include in the message.
- * @param kafkaTopic The Kafka topic to which the message is related.
- * @param messageType The type or category of the message.
- * @return A JSON-formatted string containing the provided information and a timestamp.
- */
-std::string FileMonitor::formatMessage(const std::string& filePath, const std::string& line, const std::string& kafkaTopic, const std::string& messageType) {
-    std::string timestamp = getCurrentTimestamp();
-    // Format the message as a JSON string
-    std::string formattedMessage = "{\"timestamp\": \"" + timestamp + "\", \"filePath\": \"" + filePath + "\", \"kafkaTopic\": \"" + kafkaTopic + "\", \"message\": \"" + line + "\", \"type\": \"" + messageType + "\"}";
-    return formattedMessage;
+void FileMonitor::formatAndSend(const std::string& line, const std::string& messageType) {
+    std::string formatted = formatMessage(filePath, line, kafkaTopic, messageType);
+    sendToKafka(formatted);
 }
 
 /**
@@ -171,14 +132,20 @@ std::string FileMonitor::formatMessage(const std::string& filePath, const std::s
  * @todo Implement a mechanism to gracefully terminate the infinite loop.
  */
 void FileMonitor::monitor() {
-    sendToKafka(formatMessage(filePath, " ", kafkaTopic, "INIT"));
+    // Send initialization messages
+    formatAndSend(" ", "INIT");
     char buffer[1024];
-    
-    // Open the file to check if it exists and is accessible
-    // TODO: Check if the file is accessible
 
-    sendToKafka(formatMessage(filePath, " ", kafkaTopic, "INIT - FILE OPEN"));
-    // Start monitoring for file modifications
+    // Check if the file is accessible before starting monitoring
+    std::ifstream testFile(filePath);
+    if (!testFile.is_open()) {
+        formatAndSend(" ", "ERROR - FILE OPEN");
+    } else {
+        formatAndSend(" ", "INIT - FILE OPEN");
+        testFile.close();
+    }
+
+    // Start monitoring for file modifications (infinite loop, blocks on read)
     while (true) {
         int length = read(inotifyFd, buffer, sizeof(buffer));
         if (length < 0) {
@@ -192,13 +159,13 @@ void FileMonitor::monitor() {
                 std::ifstream file(filePath);
                 if (!file.is_open()) {
                     std::cerr << "Failed to open file: " << filePath << std::endl;
-                    sendToKafka(formatMessage(filePath, " ", kafkaTopic, "ERROR - FILE OPEN"));
+                    formatAndSend(" ", "ERROR - FILE OPEN");
                     continue;
                 }
                 std::string line;
                 while (std::getline(file, line)) {
                     try {
-                        sendToKafka(formatMessage(filePath, line, kafkaTopic, "MODIFY"));
+                        formatAndSend(line, "MODIFY");
                     } catch (const std::exception& e) {
                         std::cerr << "Error sending message to Kafka: " << e.what() << std::endl;
                     }
@@ -207,8 +174,6 @@ void FileMonitor::monitor() {
             i += sizeof(struct inotify_event) + event->len;
         }
     }
-    sendToKafka(formatMessage(filePath, " ", kafkaTopic, "CLOSE"));
-    producer->flush(1000);
 }
 
 /**
