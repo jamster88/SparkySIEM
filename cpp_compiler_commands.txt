@@ -1,1 +1,11 @@
-g++ -fdiagnostics-color=always -g main.cpp FileMonitor.cpp -o SparkySIEM -lrdkafka -lrdkafka++
+Build and test are driven by the Makefile now:
+
+  make                 # build build/SparkySIEM
+  make test            # build and run the unit tests
+  make clean           # remove build output
+  ./run_tests.sh       # run the unit tests inside a Linux container (needed on macOS)
+
+The equivalent manual compile, for reference:
+
+g++ -std=c++17 -Wall -Wextra -g -pthread main.cpp MessageFormat.cpp KafkaSink.cpp \
+    FileMonitor.cpp FilesMonitor.cpp -o SparkySIEM -lrdkafka++ -lrdkafka

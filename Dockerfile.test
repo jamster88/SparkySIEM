@@ -1,0 +1,20 @@
+# Linux toolchain for building and testing SparkySIEM from a non-Linux host.
+# inotify does not exist on macOS or Windows, so the suite runs in here instead.
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        g++ \
+        make \
+        librdkafka-dev \
+        libgtest-dev \
+        nlohmann-json3-dev \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# The permission-handling test needs a process that file permissions actually apply to,
+# and root ignores them, so the suite runs as an ordinary user.
+RUN useradd --create-home --uid 1001 sparky
+USER sparky
+
+WORKDIR /work
+CMD ["make", "test"]
